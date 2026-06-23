@@ -1,0 +1,336 @@
+{
+  "platform_test_suite": {
+    "meta": {
+      "platform": "AntiGravyti Agent OS",
+      "version": "1.0",
+      "test_author": "HUGOFXLAB",
+      "date": "2026-06-22",
+      "model_target": "GLM-5.2 via OpenRouter",
+      "temperature": 0.2,
+      "top_p": 0.95,
+      "token_limit": 2048,
+      "language": "en",
+      "objective": "Find the platform's weak points, bugs, and edge cases — not just confirm that it works, but identify where it breaks"
+    },
+
+    "test_group_1_fsm_state_cycle": {
+      "label": "FSM Finite State Machine testing",
+      "scope": "state-machine.js + orchestrator.js",
+
+      "test_1_1": {
+        "id": "FSM-01",
+        "label": "Normal IDLE → COMPLETED path",
+        "system": "You are an Agent OS testing agent. You will follow the full FSM cycle and report each transition.",
+        "role": "QA engineer testing FSM logic correctness",
+        "task": "Submit a task: intent='test task', domainEngine='coding', workspaceId='test-ws'. Document every FSM state until COMPLETED.",
+        "expected_states": ["IDLE","INTENT_CAPTURED","PLANNING","ROUTING","EXECUTING","VALIDATING","PERSISTING","COMPLETED"],
+        "pass_criteria": "All 8 states passed in order, none skipped",
+        "bug_target": "Does ROUTING → EXECUTING transition get skipped? Are checkpoints created after every state?"
+      },
+
+      "test_1_2": {
+        "id": "FSM-02",
+        "label": "REWORK loop limit → REVIEW_REQUIRED",
+        "system": "You are the Judge agent and you ALWAYS reject the result (passed: false, score: 30).",
+        "role": "Strict Judge simulator",
+        "task": "Run a task. The Judge rejects it 3 times in a row. Check whether the system moved to REVIEW_REQUIRED instead of crashing.",
+        "expected_final_state": "REVIEW_REQUIRED",
+        "pass_criteria": "After maxReworks=3 → REVIEW_REQUIRED. Retry counter is correct. SSE sends task:stateChange.",
+        "bug_target": "Is the retry counter incremented correctly? Can the REWORK cycle become infinite if the maxReworks config is missing?"
+      },
+
+      "test_1_3": {
+        "id": "FSM-03",
+        "label": "CANCEL in any state",
+        "system": "You are the user sending a cancel command during every FSM state.",
+        "task": "Run a task. Cancel it: (a) during PLANNING, (b) during EXECUTING, (c) during VALIDATING. Record whether FSM ended up in CANCELLED each time.",
+        "expected_final_state": "CANCELLED",
+        "pass_criteria": "All 3 cancel scenarios end in CANCELLED. AbortController works. throwIfCancelled() reacts between steps.",
+        "bug_target": "Does cancel work during VALIDATING when the Judge has already started the model call? Does memory save a partial result?"
+      },
+
+      "test_1_4": {
+        "id": "FSM-04",
+        "label": "FAILED → RECOVERY cycle",
+        "system": "Simulate a critical error in the EXECUTING phase (model returns 500).",
+        "task": "Check whether FSM transitions FAILED → RECOVERY. Document the RECOVERY steps and whether the system can continue.",
+        "pass_criteria": "FAILED state is reached. RECOVERY is activated. SSE task:error with fatal=true is sent.",
+        "bug_target": "Is RECOVERY described in the documentation but not implemented? Does the system just remain in FAILED without any recovery?"
+      }
+    },
+
+    "test_group_2_judge_quality_cycle": {
+      "label": "Judge agent and quality cycle testing",
+      "scope": "orchestrator.js VALIDATING phase + model-adapter.js",
+
+      "test_2_1": {
+        "id": "JUDGE-01",
+        "label": "Judge returns non-JSON (NON_JSON error)",
+        "system": "Simulate the Judge model response as plain text, not JSON: 'This looks good to me, passed.'",
+        "task": "Check whether model-adapter.js detects NON_JSON. Is a 2nd attempt activated with a stricter prompt and temperature=0?",
+        "expected_behavior": "1st attempt: NON_JSON. 2nd attempt: stricter prompt. Fallback: { passed: true, score: 70, reasons: 'Judge unavailable' }",
+        "pass_criteria": "Fallback is activated. The task does not stop. SSE task:log shows the fallback situation.",
+        "bug_target": "Can fallback score=70 pass qualityThreshold=75? If threshold >70 — the task gets stuck in an infinite REWORK loop."
+      },
+
+      "test_2_2": {
+        "id": "JUDGE-02",
+        "label": "Judge score exactly on the boundary (score=75, threshold=75)",
+        "system": "Judge returns: { passed: true, score: 75, reasons: 'Barely passing' }",
+        "task": "Check whether the >= logic is implemented correctly. Score=75 must pass when threshold=75.",
+        "pass_criteria": "PERSISTING is activated. Not REWORK.",
+        "bug_target": "Is > used instead of >= — if so, score=75 goes to REWORK even though it should pass."
+      },
+
+      "test_2_3": {
+        "id": "JUDGE-03",
+        "label": "Judge returns passed=true but score<75",
+        "system": "Judge returns: { passed: true, score: 60, reasons: 'Partial completion' }",
+        "task": "Check whether the system verifies BOTH conditions (passed AND score >= threshold). Or only one?",
+        "pass_criteria": "Result is REWORK because score<75, despite passed=true.",
+        "bug_target": "Does the orchestrator check only passed and ignore score? That would let low-quality results pass."
+      },
+
+      "test_2_4": {
+        "id": "JUDGE-04",
+        "label": "Judge receives a >3000 character result",
+        "task": "Simulate an agent result that is 10,000 characters long.",
+        "pass_criteria": "Judge receives ≤3000 characters. Truncation does not break the JSON structure.",
+        "bug_target": "Can truncation cut the JSON in the middle and cause a JSON parse error?"
+      }
+    },
+
+    "test_group_3_memory_fabric": {
+      "label": "Memory Fabric 4-layer testing",
+      "scope": "memory-store.js + .data/memory.json",
+
+      "test_3_1": {
+        "id": "MEM-01",
+        "label": "FIFO rotation — 500 entry limit",
+        "system": "You are a Memory stress tester.",
+        "task": "Create 501 entries in one layer. Check whether the oldest one is deleted. Check whether memory.json does not grow without limits.",
+        "pass_criteria": "The 501st entry creates the 500th, the 1st is deleted. memory.json size stabilizes.",
+        "bug_target": "Is FIFO rotation implemented for all 4 layers or only one?"
+      },
+
+      "test_3_2": {
+        "id": "MEM-02",
+        "label": "writeChain race condition — 2 parallel tasks",
+        "system": "Run two tasks at the same time, both reaching PERSISTING at the same moment.",
+        "task": "Check whether memory.json gets corrupted. writeChain must serialize writes.",
+        "pass_criteria": "Both task entries are saved correctly. JSON is valid.",
+        "bug_target": "Does the writeChain Promise chain actually work or is it only theoretical in code? A race condition can corrupt the JSON file."
+      },
+
+      "test_3_3": {
+        "id": "MEM-03",
+        "label": "memory.json corrupted (invalid JSON)",
+        "task": "Manually write invalid JSON into memory.json. Start the server. Check whether the server crashes on startup.",
+        "pass_criteria": "Server starts. Memory module returns an empty structure or an error message. No crash.",
+        "bug_target": "Is there a try/catch around reading memory.json? A corrupted file must not kill the entire server."
+      },
+
+      "test_3_4": {
+        "id": "MEM-04",
+        "label": "Server restart — in-memory tasks disappearing",
+        "task": "Create a task. Restart the server. Try to fetch GET /api/tasks/:id.",
+        "expected_behavior": "404 or a clear error 'Task not found after restart'",
+        "pass_criteria": "Clear error, no undefined crash. Documentation confirms this is a known weakness.",
+        "bug_target": "Does the UI handle 404 correctly when the task disappeared after restart? Does the UI get stuck in a 'loading' state?"
+      }
+    },
+
+    "test_group_4_sse_real_time": {
+      "label": "SSE stream and connection stability",
+      "scope": "sse-manager.js + api-client.js",
+
+      "test_4_1": {
+        "id": "SSE-01",
+        "label": "Exponential backoff reconnect testing",
+        "task": "Break the SSE connection on the server side during the EXECUTING phase. Observe whether the client reconnects using: 1s → 2s → 4s → 8s → 16s → 30s.",
+        "pass_criteria": "Reconnect happens according to the backoff scheme. After successful reconnect, delay resets to 1s.",
+        "bug_target": "After reconnect, does the client UI refresh with the current task status or show an old state?"
+      },
+
+      "test_4_2": {
+        "id": "SSE-02",
+        "label": "SSE connection drops during PERSISTING phase",
+        "task": "Break the SSE connection exactly when the server is writing memory. Check whether: (a) the task finishes on the server, (b) the UI receives task:done after reconnect.",
+        "pass_criteria": "The server finishes the task despite SSE interruption. The UI receives the update after reconnect.",
+        "bug_target": "Does the server logic depend on the SSE connection? Is task:done lost and the UI left stuck?"
+      },
+
+      "test_4_3": {
+        "id": "SSE-03",
+        "label": "Multiple browser tabs — SSE distribution",
+        "task": "Open the platform in 3 tabs. Create a task in one. Check whether all 3 tabs receive task:stateChange events.",
+        "pass_criteria": "All tabs receive SSE. SSE manager correctly supports multiple subscribers.",
+        "bug_target": "Does SSE manager use broadcast or only the first subscriber? If only the first — other tabs do not receive updates."
+      }
+    },
+
+    "test_group_5_workspace_and_files": {
+      "label": "Workspace security and file operation testing",
+      "scope": "tools/workspace.js + tools/runner.js",
+
+      "test_5_1": {
+        "id": "WS-01",
+        "label": "Path traversal attack — ../../../etc/passwd",
+        "system": "You are a security tester.",
+        "task": "In the PATCH_CODE step, provide the file path: '../../../etc/passwd'. Check whether writeFiles() rejects it.",
+        "pass_criteria": "403 / error 'Path outside workspace'. File is NOT written.",
+        "bug_target": "Does path normalization work for Windows paths (..\\\\..\\\\)? Or is only Linux slash checking used?"
+      },
+
+      "test_5_2": {
+        "id": "WS-02",
+        "label": "buildContext — 50,000 character limit",
+        "task": "Create a workspace with files whose total size is >50,000 characters. Check whether buildContext truncates correctly.",
+        "pass_criteria": "Context ≤50,000 characters. Longer files are kept at the end (not truncated first).",
+        "bug_target": "Is the truncation algorithm correct? The documentation says 'keep longer files at the end' — does the implementation match?"
+      },
+
+      "test_5_3": {
+        "id": "WS-03",
+        "label": "runner.js — npm test failure and FIX_ERRORS activation",
+        "task": "Create a workspace with failing tests. Run the Coding engine. Check whether: (a) RUN_TESTS captures the failure, (b) FIX_ERRORS activates automatically.",
+        "pass_criteria": "FIX_ERRORS gets the real npm test output. The agent fixes based on actual errors, not guesses.",
+        "bug_target": "Is the FIX_ERRORS cycle limited? Can it create an infinite repair loop if tests always fail?"
+      },
+
+      "test_5_4": {
+        "id": "WS-04",
+        "label": "Workspace does not exist — fallback to text mode",
+        "task": "Provide workspaceId='nonexistent-ws-12345'. Check whether the system switches to text mode without crashing.",
+        "pass_criteria": "assertWorkspace() error → text mode. SSE task:log informs the user. The task continues.",
+        "bug_target": "Does the user get a clear message about text mode or is it a silent switch?"
+      }
+    },
+
+    "test_group_6_api_and_rate_limiting": {
+      "label": "API routes and rate limiting testing",
+      "scope": "routes/*.js + Fastify schema validation",
+
+      "test_6_1": {
+        "id": "API-01",
+        "label": "POST /api/tasks — missing fields",
+        "task": "Send POST /api/tasks without the 'intent' field. Then without 'domainEngine'. Check the HTTP responses.",
+        "expected_response": "400 Bad Request with a clear error message",
+        "pass_criteria": "JSON schema validation rejects it. The error message indicates which field is missing.",
+        "bug_target": "Is Fastify schema validation actually enabled on these routes? The documentation says 'minimal' — it may be incomplete."
+      },
+
+      "test_6_2": {
+        "id": "API-02",
+        "label": "Rate limiting — 21 requests/min for task creation",
+        "task": "Send 21 POST /api/tasks requests within 60 seconds from the same IP. Check whether the 21st gets 429 Too Many Requests.",
+        "pass_criteria": "429 with Retry-After header. 20 requests pass.",
+        "bug_target": "Is the rate limit counted per IP or globally? Is the reset every 60s or sliding window?"
+      },
+
+      "test_6_3": {
+        "id": "API-03",
+        "label": "POST /api/tasks/:id/resume with invalid action",
+        "task": "Send resume with body: { action: 'invalid_action' }. Check validation.",
+        "expected_response": "400 — action must be 'approve' or 'rework'",
+        "pass_criteria": "An error is returned. The system does not put FSM into an invalid state.",
+        "bug_target": "Does action validation exist or is any string accepted?"
+      },
+
+      "test_6_4": {
+        "id": "API-04",
+        "label": "GET /api/health — API key validation",
+        "task": "Check /api/health when config.json has: (a) a valid API key, (b) an empty key, (c) key missing.",
+        "pass_criteria": "Each case returns a different status. An empty key produces a clear warning.",
+        "bug_target": "Is the API key exposed in full in the /api/health response? Security weakness — the key must not be exposed."
+      }
+    },
+
+    "test_group_7_client_ui": {
+      "label": "Client UI and navigation testing",
+      "scope": "app.js + domains/* + core/router.js",
+
+      "test_7_1": {
+        "id": "UI-01",
+        "label": "Double navigation problem — _suppressHashChange",
+        "task": "Click navigation quickly between all views 10 times within 2 seconds. Check whether an infinite load loop occurs.",
+        "pass_criteria": "Each view is loaded once. _suppressHashChange flag works.",
+        "bug_target": "Can _suppressHashChange ever remain stuck true if navigation is interrupted by an error?"
+      },
+
+      "test_7_2": {
+        "id": "UI-02",
+        "label": "_loadPromise guard — race condition",
+        "task": "Quickly enter and exit a view 3 times in <500ms. Check whether the _loadPromise guard works.",
+        "pass_criteria": "Only one async load runs. UI does not show mixed data from multiple parallel loads.",
+        "bug_target": "Is _loadPromise set to null in the finally() block? If not — after the first load, the view may never load again."
+      },
+
+      "test_7_3": {
+        "id": "UI-03",
+        "label": "Task stuck 'loading' after server restart",
+        "task": "Start a task. Restart the server. Return to the UI. Check whether the UI shows a clear error instead of an endless spinner.",
+        "pass_criteria": "UI detects the SSE connection dropped. Shows a 'Connection lost' or similar message.",
+        "bug_target": "The documented weakness is that tasks disappear after restart. Does the UI handle this gracefully?"
+      }
+    },
+
+    "test_group_8_known_weaknesses": {
+      "label": "Verification of documented weaknesses",
+      "scope": "Documentation section 14 — Known weaknesses",
+
+      "test_8_1": {
+        "id": "KNOWN-01",
+        "label": "Missing authentication",
+        "task": "From another device on the same network, access http://[host]:3000/api/tasks. Check whether it is reachable without authentication.",
+        "expected_result": "FAIL — known weakness",
+        "note": "Documented weakness. The test confirms it exists and was not accidentally hidden."
+      },
+
+      "test_8_2": {
+        "id": "KNOWN-02",
+        "label": "Trading engine — simulated data",
+        "task": "Run the MARKETSENSE MARKET_READ step. Check whether the returned market data is real or simulated.",
+        "expected_result": "FAIL — simulated data",
+        "note": "Known weakness. The test documents the current implementation limit."
+      },
+
+      "test_8_3": {
+        "id": "KNOWN-03",
+        "label": "Agents cannot read memory before execution",
+        "task": "Create 2 related tasks in sequence. Check whether the second task 'remembers' the first task's results.",
+        "expected_result": "FAIL — memory is not loaded into agents",
+        "note": "Documented future feature. The test confirms it is not yet implemented."
+      }
+    },
+
+    "test_results_schema": {
+      "label": "Test result recording template",
+      "instructions": "Fill out this template after each test. Save as test_results_[date].json",
+      "fields": {
+        "test_id": "string — e.g. FSM-01",
+        "group": "string — e.g. FSM / JUDGE / MEM / SSE / WS / API / UI / KNOWN",
+        "status": "PASS | FAIL | PARTIAL | SKIP",
+        "bug_found": "boolean",
+        "bug_description": "string — what exactly was found, if bug_found=true",
+        "severity": "CRITICAL | HIGH | MEDIUM | LOW",
+        "reproduction_steps": "string — how to reproduce",
+        "model_used": "GLM-5.2",
+        "timestamp": "ISO 8601",
+        "notes": "string"
+      },
+      "example": {
+        "test_id": "JUDGE-02",
+        "group": "JUDGE",
+        "status": "FAIL",
+        "bug_found": true,
+        "bug_description": "The orchestrator uses > instead of >= — score=75 goes to REWORK when threshold=75",
+        "severity": "HIGH",
+        "reproduction_steps": "1. Set qualityThreshold=75. 2. Judge returns score=75, passed=true. 3. Observe whether PERSISTING or REWORK happens.",
+        "model_used": "GLM-5.2",
+        "timestamp": "2026-06-22T23:27:00Z",
+        "notes": "Fix: change > to >= in orchestrator.js VALIDATING logic"
+      }
+    }
+  }
+}

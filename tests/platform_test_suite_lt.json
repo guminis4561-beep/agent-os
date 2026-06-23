@@ -1,0 +1,336 @@
+{
+  "platform_test_suite": {
+    "meta": {
+      "platform": "AntiGravyti Agent OS",
+      "version": "1.0",
+      "test_author": "HUGOFXLAB",
+      "date": "2026-06-22",
+      "model_target": "GLM-5.2 via OpenRouter",
+      "temperature": 0.2,
+      "top_p": 0.95,
+      "token_limit": 2048,
+      "language": "lt",
+      "objective": "Rasti platformos silpnąsias vietas, klaidas ir ribinius atvejus — ne tik patvirtinti, kad ji veikia, bet ir nustatyti, kur ji lūžta"
+    },
+
+    "test_group_1_fsm_state_cycle": {
+      "label": "FSM (Baigtinių būsenų mašinos) testavimas",
+      "scope": "state-machine.js + orchestrator.js",
+
+      "test_1_1": {
+        "id": "FSM-01",
+        "label": "Normalus IDLE → COMPLETED kelias",
+        "system": "Tu esi Agent OS testavimo agentas. Tu seksi visą FSM ciklą ir praneši apie kiekvieną perėjimą.",
+        "role": "QA inžinierius, testuojantis FSM logikos teisingumą",
+        "task": "Pateikti užduotį: intent='test task', domainEngine='coding', workspaceId='test-ws'. Dokumentuoti kiekvieną FSM būseną iki COMPLETED.",
+        "expected_states": ["IDLE","INTENT_CAPTURED","PLANNING","ROUTING","EXECUTING","VALIDATING","PERSISTING","COMPLETED"],
+        "pass_criteria": "Praeitos visos 8 būsenos iš eilės, nei viena nepraleista",
+        "bug_target": "Ar ROUTING → EXECUTING perėjimas praleidžiamas? Ar išsaugomi kontroliniai taškai (checkpoints) po kiekvienos būsenos?"
+      },
+
+      "test_1_2": {
+        "id": "FSM-02",
+        "label": "REWORK ciklo riba → REVIEW_REQUIRED",
+        "system": "Tu esi Teisėjo (Judge) agentas ir VISADA atmeti rezultatą (passed: false, score: 30).",
+        "role": "Griežtas Teisėjo simuliatorius",
+        "task": "Paleisti užduotį. Teisėjas ją atmeta 3 kartus iš eilės. Patikrinti, ar sistema perėjo į REVIEW_REQUIRED, užuot nulūžusi.",
+        "expected_final_state": "REVIEW_REQUIRED",
+        "pass_criteria": "Po maxReworks=3 → REVIEW_REQUIRED. Bandymų skaitiklis teisingas. SSE išsiunčia task:stateChange.",
+        "bug_target": "Ar bandymų skaitiklis padidinamas teisingai? Ar REWORK ciklas gali tapti begalinis, jei trūksta maxReworks konfigūracijos?"
+      },
+
+      "test_1_3": {
+        "id": "FSM-03",
+        "label": "CANCEL bet kurioje būsenoje",
+        "system": "Tu esi vartotojas, siunčiantis atšaukimo (cancel) komandą kiekvienos FSM būsenos metu.",
+        "task": "Paleisti užduotį. Atšaukti ją: (a) PLANNING metu, (b) EXECUTING metu, (c) VALIDATING metu. Užfiksuoti, ar FSM kiekvieną kartą baigėsi CANCELLED būsena.",
+        "expected_final_state": "CANCELLED",
+        "pass_criteria": "Visi 3 atšaukimo scenarijai baigiasi CANCELLED. AbortController veikia. throwIfCancelled() reaguoja tarp žingsnių.",
+        "bug_target": "Ar atšaukimas veikia VALIDATING metu, kai Teisėjas jau pradėjo modelio užklausą? Ar atmintis išsaugo dalinį rezultatą?"
+      },
+
+      "test_1_4": {
+        "id": "FSM-04",
+        "label": "FAILED → RECOVERY ciklas",
+        "system": "Simuliuoti kritinę klaidą EXECUTING fazėje (modelis grąžina 500).",
+        "task": "Patikrinti, ar FSM pereina į FAILED → RECOVERY. Dokumentuoti RECOVERY žingsnius ir tai, ar sistema gali tęsti darbą.",
+        "pass_criteria": "Pasiekta FAILED būsena. Aktyvuotas RECOVERY. Išsiųstas SSE task:error su fatal=true.",
+        "bug_target": "Ar RECOVERY aprašytas dokumentacijoje, bet neįgyvendintas? Ar sistema tiesiog lieka FAILED būsenoje be jokio atsigavimo?"
+      }
+    },
+
+    "test_group_2_judge_quality_cycle": {
+      "label": "Teisėjo agento ir kokybės ciklo testavimas",
+      "scope": "orchestrator.js VALIDATING fazė + model-adapter.js",
+
+      "test_2_1": {
+        "id": "JUDGE-01",
+        "label": "Teisėjas grąžina ne JSON (NON_JSON klaida)",
+        "system": "Simuliuoti Teisėjo modelio atsakymą kaip paprastą tekstą, ne JSON: 'This looks good to me, passed.'",
+        "task": "Patikrinti, ar model-adapter.js aptinka NON_JSON. Ar aktyvuojamas 2-asis bandymas su griežtesniu promptu ir temperature=0?",
+        "expected_behavior": "1-as bandymas: NON_JSON. 2-as bandymas: griežtesnis promptas. Atsarginis variantas (Fallback): { passed: true, score: 70, reasons: 'Teisėjas nepasiekiamas' }",
+        "pass_criteria": "Atsarginis variantas aktyvuotas. Užduotis nesustoja. SSE task:log parodo atsarginio varianto situaciją.",
+        "bug_target": "Ar atsarginis variantas score=70 gali praeiti qualityThreshold=75? Jei slenkstis >70 — užduotis įstringa begaliniame REWORK cikle."
+      },
+
+      "test_2_2": {
+        "id": "JUDGE-02",
+        "label": "Teisėjo balas lygiai ant ribos (score=75, threshold=75)",
+        "system": "Teisėjas grąžina: { passed: true, score: 75, reasons: 'Vos praeina' }",
+        "task": "Patikrinti, ar >= logika įgyvendinta teisingai. Score=75 turi praeiti, kai threshold=75.",
+        "pass_criteria": "Aktyvuotas PERSISTING. Ne REWORK.",
+        "bug_target": "Ar naudojamas > vietoj >= — jei taip, score=75 eina į REWORK, nors turėtų praeiti."
+      },
+
+      "test_2_3": {
+        "id": "JUDGE-03",
+        "label": "Teisėjas grąžina passed=true, bet score<75",
+        "system": "Teisėjas grąžina: { passed: true, score: 60, reasons: 'Dalinis atlikimas' }",
+        "task": "Patikrinti, ar sistema tikrina ABI sąlygas (passed IR score >= threshold). Ar tik vieną?",
+        "pass_criteria": "Rezultatas yra REWORK, nes score<75, nepaisant to, kad passed=true.",
+        "bug_target": "Ar orkestratorius tikrina tik passed ir ignoruoja score? Tai leistų praeiti žemos kokybės rezultatams."
+      },
+
+      "test_2_4": {
+        "id": "JUDGE-04",
+        "label": "Teisėjas gauna >3000 simbolių rezultatą",
+        "task": "Simuliuoti agento rezultatą, kurio ilgis 10 000 simbolių.",
+        "pass_criteria": "Teisėjas gauna ≤3000 simbolių. Sutrumpinimas nesugadina JSON struktūros.",
+        "bug_target": "Ar sutrumpinimas gali nukirpti JSON per vidurį ir sukelti JSON apdorojimo (parse) klaidą?"
+      }
+    },
+
+    "test_group_3_memory_fabric": {
+      "label": "Memory Fabric 4-sluoksnių testavimas",
+      "scope": "memory-store.js + .data/memory.json",
+
+      "test_3_1": {
+        "id": "MEM-01",
+        "label": "FIFO rotacija — 500 įrašų limitas",
+        "system": "Tu esi Atminties (Memory) testuotojas.",
+        "task": "Sukurti 501 įrašą viename sluoksnyje. Patikrinti, ar seniausias yra ištrinamas. Patikrinti, ar memory.json neauga be ribų.",
+        "pass_criteria": "501-asis įrašas sukuria 500-ąjį, 1-asis yra ištrinamas. memory.json dydis stabilizuojasi.",
+        "bug_target": "Ar FIFO rotacija įgyvendinta visiems 4 sluoksniams, ar tik vienam?"
+      },
+
+      "test_3_2": {
+        "id": "MEM-02",
+        "label": "writeChain lenktynių sąlyga (race condition) — 2 lygiagrečios užduotys",
+        "system": "Paleisti dvi užduotis vienu metu, abi pasiekia PERSISTING tuo pačiu metu.",
+        "task": "Patikrinti, ar memory.json nėra sugadinamas. writeChain privalo serijuoti (serialize) įrašymus.",
+        "pass_criteria": "Abiejų užduočių įrašai išsaugomi teisingai. JSON yra validus.",
+        "bug_target": "Ar writeChain Promise grandinė tikrai veikia, ar ji tik teorinė kode? Lenktynių sąlyga gali sugadinti JSON failą."
+      },
+
+      "test_3_3": {
+        "id": "MEM-03",
+        "label": "memory.json sugadintas (nevalidus JSON)",
+        "task": "Rankiniu būdu įrašyti nevalidų JSON į memory.json. Paleisti serverį. Patikrinti, ar serveris nenulūžta startuodamas.",
+        "pass_criteria": "Serveris pasileidžia. Atminties modulis grąžina tuščią struktūrą arba klaidos pranešimą. Nėra nulūžimo (crash).",
+        "bug_target": "Ar yra try/catch aplink memory.json nuskaitymą? Sugadintas failas neturi nulaužti viso serverio."
+      },
+
+      "test_3_4": {
+        "id": "MEM-04",
+        "label": "Serverio perkrovimas — atmintyje esančios užduotys dingsta",
+        "task": "Sukurti užduotį. Perkrauti serverį. Pabandyti iškviesti GET /api/tasks/:id.",
+        "expected_behavior": "404 arba aiški klaida 'Užduotis nerasta po perkrovimo'",
+        "pass_criteria": "Aiški klaida, jokio neapibrėžto (undefined) nulūžimo. Dokumentacija patvirtina, kad tai žinoma silpnybė.",
+        "bug_target": "Ar UI teisingai apdoroja 404, kai užduotis dingsta po perkrovimo? Ar UI įstringa 'krovimo' (loading) būsenoje?"
+      }
+    },
+
+    "test_group_4_sse_real_time": {
+      "label": "SSE srauto ir ryšio stabilumo testavimas",
+      "scope": "sse-manager.js + api-client.js",
+
+      "test_4_1": {
+        "id": "SSE-01",
+        "label": "Eksponentinio atgalinio ryšio (backoff) prisijungimo testavimas",
+        "task": "Nutraukti SSE ryšį serverio pusėje EXECUTING fazės metu. Stebėti, ar klientas persijungia naudodamas: 1s → 2s → 4s → 8s → 16s → 30s.",
+        "pass_criteria": "Persijungimas vyksta pagal numatytą schemą. Po sėkmingo prisijungimo delsa atstatoma į 1s.",
+        "bug_target": "Ar po persijungimo kliento UI atsinaujina su dabartine užduoties būsena, ar rodo seną būseną?"
+      },
+
+      "test_4_2": {
+        "id": "SSE-02",
+        "label": "SSE ryšys nutrūksta PERSISTING fazės metu",
+        "task": "Nutraukti SSE ryšį lygiai tada, kai serveris rašo į atmintį. Patikrinti ar: (a) užduotis baigiama serveryje, (b) UI gauna task:done po persijungimo.",
+        "pass_criteria": "Serveris baigia užduotį nepaisant SSE nutrūkimo. UI gauna atnaujinimą po persijungimo.",
+        "bug_target": "Ar serverio logika priklauso nuo SSE ryšio? Ar task:done prarandamas ir UI lieka įstrigęs?"
+      },
+
+      "test_4_3": {
+        "id": "SSE-03",
+        "label": "Keli naršyklės skirtukai (tabs) — SSE paskirstymas",
+        "task": "Atidaryti platformą 3 skirtukuose. Sukurti užduotį viename iš jų. Patikrinti, ar visi 3 skirtukai gauna task:stateChange įvykius.",
+        "pass_criteria": "Visi skirtukai gauna SSE. SSE valdytojas teisingai palaiko kelis prenumeratorius.",
+        "bug_target": "Ar SSE valdytojas naudoja transliaciją (broadcast), ar siunčia tik pirmajam prenumeratoriui? Jei tik pirmajam — kiti skirtukai negauna atnaujinimų."
+      }
+    },
+
+    "test_group_5_workspace_and_files": {
+      "label": "Darbo srities (Workspace) saugumo ir failų operacijų testavimas",
+      "scope": "tools/workspace.js + tools/runner.js",
+
+      "test_5_1": {
+        "id": "WS-01",
+        "label": "Kelio peržengimo (Path traversal) ataka — ../../../etc/passwd",
+        "system": "Tu esi saugumo testuotojas.",
+        "task": "PATCH_CODE žingsnyje nurodyti failo kelią: '../../../etc/passwd'. Patikrinti, ar writeFiles() jį atmeta.",
+        "pass_criteria": "403 / klaida 'Kelias už darbo srities ribų'. Failas NĖRA įrašomas.",
+        "bug_target": "Ar kelio normalizacija veikia Windows keliams (..\\\\..\\\\)? Ar tikrinami tik Linux pasvirieji brūkšniai?"
+      },
+
+      "test_5_2": {
+        "id": "WS-02",
+        "label": "buildContext — 50 000 simbolių limitas",
+        "task": "Sukurti darbo sritį su failais, kurių bendras dydis yra >50 000 simbolių. Patikrinti, ar buildContext teisingai sutrumpina.",
+        "pass_criteria": "Kontekstas ≤50 000 simbolių. Ilgesni failai paliekami pabaigoje (nėra sutrumpinami pirmi).",
+        "bug_target": "Ar sutrumpinimo algoritmas teisingas? Dokumentacija sako 'ilgesnius failus laikyti pabaigoje' — ar realizacija tai atitinka?"
+      },
+
+      "test_5_3": {
+        "id": "WS-03",
+        "label": "runner.js — npm test nesėkmė ir FIX_ERRORS aktyvacija",
+        "task": "Sukurti darbo sritį su nepavykstančiais testais. Paleisti Coding variklį. Patikrinti, ar: (a) RUN_TESTS užfiksuoja klaidą, (b) FIX_ERRORS aktyvuojasi automatiškai.",
+        "pass_criteria": "FIX_ERRORS gauna tikrąją npm test išvestį. Agentas taiso remdamasis tikromis klaidomis, o ne spėliojimais.",
+        "bug_target": "Ar FIX_ERRORS ciklas ribojamas? Ar jis gali sukurti begalinį taisymo ciklą, jei testai visada nepavyksta?"
+      },
+
+      "test_5_4": {
+        "id": "WS-04",
+        "label": "Darbo sritis neegzistuoja — perėjimas į tekstinį režimą",
+        "task": "Pateikti workspaceId='nonexistent-ws-12345'. Patikrinti, ar sistema persijungia į tekstinį režimą be nulūžimo.",
+        "pass_criteria": "assertWorkspace() klaida → tekstinis režimas. SSE task:log informuoja vartotoją. Užduotis tęsiama.",
+        "bug_target": "Ar vartotojas gauna aiškų pranešimą apie tekstinį režimą, ar tai įvyksta tyliai?"
+      }
+    },
+
+    "test_group_6_api_and_rate_limiting": {
+      "label": "API maršrutų (routes) ir užklausų ribojimo testavimas",
+      "scope": "routes/*.js + Fastify schemos validacija",
+
+      "test_6_1": {
+        "id": "API-01",
+        "label": "POST /api/tasks — trūksta laukų",
+        "task": "Išsiųsti POST /api/tasks be 'intent' lauko. Po to be 'domainEngine'. Patikrinti HTTP atsakymus.",
+        "expected_response": "400 Bad Request su aiškiu klaidos pranešimu",
+        "pass_criteria": "JSON schemos validacija atmeta užklausą. Klaidos pranešimas nurodo, kurio lauko trūksta.",
+        "bug_target": "Ar Fastify schemos validacija tikrai įjungta šiuose maršrutuose? Dokumentacijoje rašoma 'minimali' — ji gali būti nepilna."
+      },
+
+      "test_6_2": {
+        "id": "API-02",
+        "label": "Užklausų ribojimas (Rate limiting) — 21 užklausa/min užduočių kūrimui",
+        "task": "Išsiųsti 21 POST /api/tasks užklausą per 60 sekundžių iš to paties IP. Patikrinti, ar 21-oji gauna 429 Too Many Requests.",
+        "pass_criteria": "429 su Retry-After antrašte (header). 20 užklausų praeina.",
+        "bug_target": "Ar limitas skaičiuojamas pagal IP, ar globaliai? Ar atstatymas vyksta kas 60s, ar slenkančio lango principu?"
+      },
+
+      "test_6_3": {
+        "id": "API-03",
+        "label": "POST /api/tasks/:id/resume su negalimu veiksmu",
+        "task": "Išsiųsti resume su body: { action: 'invalid_action' }. Patikrinti validaciją.",
+        "expected_response": "400 — veiksmas turi būti 'approve' arba 'rework'",
+        "pass_criteria": "Grąžinama klaida. Sistema neperkelia FSM į nevalidžią būseną.",
+        "bug_target": "Ar veiksmo validacija egzistuoja, ar priimama bet kokia eilutė (string)?"
+      },
+
+      "test_6_4": {
+        "id": "API-04",
+        "label": "GET /api/health — API rakto validacija",
+        "task": "Patikrinti /api/health kai config.json turi: (a) validų API raktą, (b) tuščią raktą, (c) raktas trūksta.",
+        "pass_criteria": "Kiekvienas atvejis grąžina skirtingą statusą. Tuščias raktas sukuria aiškų įspėjimą.",
+        "bug_target": "Ar API raktas atskleidžiamas pilnai /api/health atsakyme? Saugumo spraga — raktas neturi būti atskleistas."
+      }
+    },
+
+    "test_group_7_client_ui": {
+      "label": "Kliento UI ir navigacijos testavimas",
+      "scope": "app.js + domains/* + core/router.js",
+
+      "test_7_1": {
+        "id": "UI-01",
+        "label": "Dvigubos navigacijos problema — _suppressHashChange",
+        "task": "Greitai spustelėti navigaciją tarp visų peržiūrų 10 kartų per 2 sekundes. Patikrinti, ar neįvyksta begalinio krovimo ciklas.",
+        "pass_criteria": "Kiekviena peržiūra užkraunama vieną kartą. _suppressHashChange vėliavėlė veikia.",
+        "bug_target": "Ar _suppressHashChange kada nors gali likti įstrigusi true būsenoje, jei navigacija pertraukiama klaidos?"
+      },
+
+      "test_7_2": {
+        "id": "UI-02",
+        "label": "_loadPromise apsauga — lenktynių sąlyga",
+        "task": "Greitai įeiti ir išeiti iš peržiūros 3 kartus per <500ms. Patikrinti, ar _loadPromise apsauga veikia.",
+        "pass_criteria": "Vykdomas tik vienas asinchroninis krovimas. UI nerodo sumaišytų duomenų iš kelių lygiagrečių krovimų.",
+        "bug_target": "Ar _loadPromise nustatomas į null finally() bloke? Jei ne — po pirmo pakrovimo, peržiūra gali niekada nebūti užkrauta dar kartą."
+      },
+
+      "test_7_3": {
+        "id": "UI-03",
+        "label": "Užduotis įstrigusi 'loading' būsenoje po serverio perkrovimo",
+        "task": "Pradėti užduotį. Perkrauti serverį. Grįžti į UI. Patikrinti, ar UI rodo aiškią klaidą vietoje begalinio sukimosi (spinner).",
+        "pass_criteria": "UI aptinka, kad SSE ryšys nutrūko. Rodo 'Ryšys prarastas' arba panašų pranešimą.",
+        "bug_target": "Dokumentuota silpnybė yra ta, kad užduotys dingsta po perkrovimo. Ar UI susitvarko su tuo grakščiai?"
+      }
+    },
+
+    "test_group_8_known_weaknesses": {
+      "label": "Dokumentuotų silpnybių patikrinimas",
+      "scope": "Dokumentacijos 14 skyrius — Žinomos silpnybės",
+
+      "test_8_1": {
+        "id": "KNOWN-01",
+        "label": "Trūksta autentifikacijos",
+        "task": "Iš kito įrenginio tame pačiame tinkle pasiekti http://[host]:3000/api/tasks. Patikrinti, ar tai pasiekiama be autentifikacijos.",
+        "expected_result": "FAIL — žinoma silpnybė",
+        "note": "Dokumentuota silpnybė. Testas patvirtina, kad ji egzistuoja ir nebuvo netyčia paslėpta."
+      },
+
+      "test_8_2": {
+        "id": "KNOWN-02",
+        "label": "Prekybos (Trading) variklis — simuliuoti duomenys",
+        "task": "Paleisti MARKETSENSE MARKET_READ žingsnį. Patikrinti, ar grąžinami rinkos duomenys yra tikri, ar simuliuoti.",
+        "expected_result": "FAIL — simuliuoti duomenys",
+        "note": "Žinoma silpnybė. Testas dokumentuoja dabartinį įgyvendinimo limitą."
+      },
+
+      "test_8_3": {
+        "id": "KNOWN-03",
+        "label": "Agentai negali nuskaityti atminties prieš vykdymą",
+        "task": "Sukurti 2 susijusias užduotis iš eilės. Patikrinti, ar antroji užduotis 'prisimena' pirmosios užduoties rezultatus.",
+        "expected_result": "FAIL — atmintis nėra įkeliama į agentus",
+        "note": "Dokumentuota ateities funkcija. Testas patvirtina, kad tai dar neįgyvendinta."
+      }
+    },
+
+    "test_results_schema": {
+      "label": "Testo rezultatų fiksavimo šablonas",
+      "instructions": "Užpildyti šį šabloną po kiekvieno testo. Išsaugoti kaip test_results_[date].json",
+      "fields": {
+        "test_id": "string — pvz. FSM-01",
+        "group": "string — pvz. FSM / JUDGE / MEM / SSE / WS / API / UI / KNOWN",
+        "status": "PASS | FAIL | PARTIAL | SKIP",
+        "bug_found": "boolean",
+        "bug_description": "string — kas tiksliai buvo rasta, jei bug_found=true",
+        "severity": "CRITICAL | HIGH | MEDIUM | LOW",
+        "reproduction_steps": "string — kaip atkurti",
+        "model_used": "GLM-5.2",
+        "timestamp": "ISO 8601",
+        "notes": "string"
+      },
+      "example": {
+        "test_id": "JUDGE-02",
+        "group": "JUDGE",
+        "status": "FAIL",
+        "bug_found": true,
+        "bug_description": "Orkestratorius naudoja > vietoj >= — score=75 eina į REWORK, kai threshold=75",
+        "severity": "HIGH",
+        "reproduction_steps": "1. Nustatyti qualityThreshold=75. 2. Teisėjas grąžina score=75, passed=true. 3. Stebėti, ar įvyksta PERSISTING, ar REWORK.",
+        "model_used": "GLM-5.2",
+        "timestamp": "2026-06-22T23:27:00Z",
+        "notes": "Pataisymas: pakeisti > į >= orchestrator.js VALIDATING logikoje"
+      }
+    }
+  }
+}
